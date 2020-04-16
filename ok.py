@@ -6,14 +6,16 @@ import numpy as np
 import cv2
 
 
-# 4/14 cy:
+# 4/16 cy:
 
-# 删除输出前（使图像模糊）的高斯滤波
-# 对主流程代码更详细的注释并区分注释者
-# 规范代码格式
-# 代码无关：将代码放在了自己的github上，目前仅供陈烨自己存档备份
-# 下一步:返回具体的像素点离凸包线的距离 measureDist=True，一定距离内轻度上色
-# 题外话:优化考虑-能否只遍历凸包周围的像素
+# 得到所有上色点的dist和dist_inside，绘制直方图（Part 1)
+# 统计示例图的上色像素个数：5585,由此可得，在嘴唇内部进行bfs似乎可行
+# 代码现存问题：上色部分还比较粗糙，最直接的bug是颜色会越界变成黑色(Part 2-2)
+# 代码现存问题：嘴唇实际上是凹多边形，凸包则会导致上嘴唇的凹陷区域算作内部(Part 2-1)
+# Part2-1解决：将凹多边形分成2个凸多边形，生成<外嘴唇-左凸包>和<外嘴唇-右凸包>
+# ---最后上色区域为：(<外嘴唇-左凸包>内部+边界 或 <外嘴唇-右凸包>内部+边界) 且 <内嘴唇凸包>内部+边界
+# 下一步：探究bfs（魔棒法）在边缘部分的可行性？
+
 
 def rect_to_bb(rect):  # [psy]:获得人脸矩形的坐标信息
     x = rect.left()
@@ -93,6 +95,10 @@ def bfs(image, edge_list, convex):
     return image
 
 
+def soft_edge():  # [cy]:边缘自然化函数
+    return False
+
+
 def feature(path, color):
     detector = dlib.get_frontal_face_detector()  # [cy]:人脸检测仪
     predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")  # [cy]:关键点检测器
@@ -111,7 +117,7 @@ def feature(path, color):
     for (i, rect) in enumerate(rects):  # [cy]:遍历所有脸的方框
         shape = predictor(gray, rect)  # [cy]:用关键点检测器检测出关键点们
         shape = shape_to_np(shape)  # [cy]:关键点们变成numpy数组
-        shape = shape[48:]  # [cy]:关键点[48-68]是嘴唇区域
+        shape = shape[48:]  # [cy]:关键点[48-67]是嘴唇区域
         shapes.append(shape)  # [cy]:把这张脸的嘴唇关键点插入到shapes
     # [psy]:
     # 图片转为hsv形式，色调（H），饱和度（S），亮度（V）
@@ -119,33 +125,45 @@ def feature(path, color):
     # S:  0 — 255
     # V:  0 — 255
     image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    # [cy]:
     for shape in shapes:
         # [cy]:遍历每个嘴唇
         # [cy]:图像的高与宽
         sx, sy = image.shape[0], image.shape[1]
-        # [psy]:外嘴唇凸包
-        hull = cv2.convexHull(shape)
+        # [cy]:外嘴唇左半边凸包
+        hull_left = cv2.convexHull(np.concatenate((shape[0:4], shape[7:12])))
+        # [cy]:外嘴唇右半边凸包
+        hull_right = cv2.convexHull(shape[3:8])
         # [psy]:内嘴唇凸包
-        hull2 = cv2.convexHull(shape[12:])
+        hull_inside = cv2.convexHull(shape[12:])
         for xx in range(sx):
             for yy in range(sy):
-                # [cy]:获得(xx,yy)到外凸包的距离，正数说明在内部，measureDist:是否返回准确距离
-                dist = cv2.pointPolygonTest(hull, (xx, yy), measureDist=False)
+                # [cy]:获得(xx,yy)到左外凸包的距离，正数说明在内部，measureDist:是否返回准确距离
+                dist_left = cv2.pointPolygonTest(hull_left, (xx, yy), measureDist=False)
+                # [cy]:获得(xx,yy)到右外凸包的距离，正数说明在内部，measureDist:是否返回准确距离
+                dist_right = cv2.pointPolygonTest(hull_right, (xx, yy), measureDist=False)
                 # [cy]:获得(xx,yy)到内凸包的距离，正数说明在内部，measureDist:是否返回准确距离
-                dist_inside = cv2.pointPolygonTest(hull2, (xx, yy), measureDist=False)
-                # [psy]:在外嘴唇凸包以内、在内嘴唇凸包以外部分为嘴唇
-                if dist >= 0 and dist_inside < 0:
+                dist_inside = cv2.pointPolygonTest(hull_inside, (xx, yy), measureDist=False)
+                # [cy]:正在开发边缘自然化方法
+                # add=soft_edge(hull, dist, dist_inside)
+                # [cy]:(在外嘴唇左凸包以内或在外嘴唇右凸包以内)且在内嘴唇凸包以外为嘴唇
+                if (dist_left >= 0 or dist_right >= 0) and dist_inside < 0:
                     image[yy, xx][0] = color[0]
                     image[yy, xx][1] = color[1]
                     image[yy, xx][2] += 10
-
     image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)  # [cy]:重新将图像转为BGR格式
     # image = cv2.GaussianBlur(image, (7, 7), 0)  # [cy]:高斯模糊图像，我认为没有用处
+    # [cy]:可以查看凹多边形分成2个凸多边形
+    # shape=shapes[0]
+    # polygon1 = np.concatenate((shape[0:4], shape[7:12]))  # 48 49 50 51  55 56 57 58 59
+    # polygon2 = shape[3:8] # 51 52 53 54 55
+    # cv2.polylines(image, [polygon1], True, (0, 0, 0), 2)
+    # cv2.polylines(image, [polygon2], True, (0, 0, 250), 2)
     return image
 
 
 if __name__ == "__main__":
-    input_image_path = "test.jpg"  # [cy]:输入图像.jpg
+    input_image_path = "test2.jpg"  # [cy]:输入图像.jpg
     lipstick_color = [175, 150, 0]  # [cy]:嘴唇颜色
     image_output = feature(input_image_path, lipstick_color)  # [cy]:处理图像
     cv2.imshow("Output", image_output)  # [cy]:显示 输出图像2.jpg
